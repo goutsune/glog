@@ -1,88 +1,32 @@
 #!/usr/bin/env python3
-'''Maildir -> Gemtext publisher.'''
-
-from __future__ import annotations
-
-# ---- config ---------------------------------------------------------------
-
-from pathlib import Path
 import json
-import logging
 import mailbox
 import os
 import re
 import tempfile
 import unicodedata
+
+from pathlib import Path
 from datetime import datetime, timezone
 from email import policy
-from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
-
-import dkim
 from feedgen.feed import FeedGenerator
 
+from config import log
 
-MAILDIR = Path('~/mail/Tilde')
-ROOT = Path('/srv/gemini')
-ALLOWED_SENDER = 'gougou@tilde.team'
-BASE_URL = 'gemini://ghosisiphus.xyz'
-SUBJ_PREFIX = 'gmi: '
-
-DEFAULT_PUBLISH_PATH = '/glog'    # '/' or one suffix like '/rant'
-FEED_PUBLISH_PATH = '/'     # directory whose feed cache is used
-SITE_TITLE = 'Gouganda'
-FEED_NAME = 'atom.xml'
-FEED_CACHE_NAME = '.atom-feed-cache.json'
-FEED_MAX_ENTRIES = 10
-
-REQUIRE_DKIM_DOMAIN_ALIGNMENT = True
-LOG_LEVEL = 'INFO'
-
-
-log = logging.getLogger('maildir_gemlog')
 placeholder_re = re.compile(r'^(=> )\{\}(\s+.*)?$', re.MULTILINE)
 LIST_RE = re.compile(r'^\d+\.\s')
 LINK_RE = re.compile(r'^=> ')
-
-def publish_dir(suffix):
-  rel = suffix.strip().lstrip('/')
-  path = ROOT / rel if rel else ROOT
-  if not path.is_dir():
-    raise FileNotFoundError(f'publish directory does not exist: {path}')
-  return path
 
 
 def public_path(suffix, name):
   return f'{rel}/{name}' if rel else f'/{name}'
 
 
-def slug(text):
-  text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode()
-  text = re.sub(r'[^a-zA-Z0-9]+', '-', text.lower()).strip('-')
-  return text or 'post'
-
-
 def atomic_write(path, data):
   os.makedirs(path.parent, exist_ok=True)
   with open(path, 'wb') as f:
     f.write(data)
-
-
-def dkim_ok(raw, sender):
-  if not dkim.verify(raw):
-    return False
-  if not REQUIRE_DKIM_DOMAIN_ALIGNMENT:
-    return True
-  m = re.search(rb'\bd=([^;\s]+)', raw.split(b'\r\n\r\n', 1)[0], re.I)
-  return bool(m and m.group(1).decode('ascii', 'ignore').lower() == sender.rsplit('@', 1)[-1].lower())
-
-
-def sender_ok(header):
-  return parseaddr(header or '')[1].lower() == ALLOWED_SENDER.lower()
-
-
-def subject_ok(subject):
-  return subject.startswith(SUBJ_PREFIX)
 
 
 def msg_date(msg):
@@ -93,16 +37,6 @@ def msg_date(msg):
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
   except Exception:
     return datetime.now(timezone.utc)
-
-
-def text_part(msg):
-  part = msg.get_body(preferencelist=('plain',))
-  if part:
-    return part.get_content()
-  for part in msg.walk():
-    if part.get_content_type() == 'text/plain' and part.get_content_disposition() != 'attachment':
-      return part.get_content()
-  return None
 
 
 def attachments(msg):
@@ -116,16 +50,6 @@ def attachments(msg):
     suffix = re.sub(r'[^a-zA-Z0-9.]', '', Path(name).suffix.lower()) or '.bin'
     out.append((stem + suffix, part.get_payload(decode=True) or b''))
   return out
-
-
-def split_suffix(text):
-  text = text.replace('\r\n', '\n').replace('\r', '\n')
-  lines = text.split('\n')
-  first = lines[0].strip() if lines else ''
-  if first.startswith('/'):
-    return first, '\n'.join(lines[1:]).lstrip('\n')
-  return DEFAULT_PUBLISH_PATH, text
-
 
 def reflow(text: str) -> str:
   out: list[str] = []
@@ -249,68 +173,6 @@ def make_atom(feed_dir):
   fg.atom_file(str(ROOT / FEED_NAME), pretty=True)
 
 
-def save_unique(path: Path, data: bytes) -> Path:
-  base, suffix, i = path.with_suffix(''), path.suffix, 1
-  target = path
-  while target.exists():
-    target = Path(f'{base}-{i}{suffix}')
-    i += 1
-  atomic_write(target, data)
-  return target
-
-
-def publish(raw: bytes) -> dict | None:
-  msg = BytesParser(policy=policy.default).parsebytes(raw)
-  if not sender_ok(msg.get('From')):
-    return None
-
-  if not subject_ok(msg.get('Subject')):
-    log.info('Ignoring message with wrong subject: %r', msg.get('Subject'))
-    return None
-
-  if not dkim_ok(raw, ALLOWED_SENDER):
-    log.warning('invalid DKIM: %r', msg.get('Subject'))
-    return None
-
-  body = text_part(msg)
-  if body is None:
-    log.warning('no text/plain body: %r', msg.get('Subject'))
-    return None
-
-  title = str(msg.get('Subject') or 'No Title').strip() or 'No Title'
-  title = title.replace(SUBJ_PREFIX, '')
-  suffix, body = split_suffix(body)
-  out_dir = publish_dir(suffix)
-  date = msg_date(msg)
-  title_date = f'{date:%Y-%m-%d} {title}'
-  article = save_unique(out_dir / f'{date:%Y-%m-%d}-{slug(title)}.gmi', b'')
-  article_attach_dir = out_dir / article.stem
-
-  saved = []
-  for name, data in attachments(msg):
-    article_attach_dir.mkdir(exist_ok=False) if not article_attach_dir.exists() else None
-    saved.append(save_unique(article_attach_dir / name, data))
-
-  body = replace_placeholders(reflow(body), saved, out_dir)
-  atomic_write(article, f'# {title}\n\n{body.strip()}\n'.encode())
-  insert_index_entry(out_dir / 'index.gmi', article.name, title_date)
-
-  item = {
-    'title': title,
-    'path': f'{suffix}/{article.name}' if suffix else f'/{article.name}',
-    'updated': date.isoformat()
-  }
-  cache_path = publish_dir(FEED_PUBLISH_PATH) / FEED_CACHE_NAME
-  save_feed_cache(
-    cache_path,
-    [item] + [
-      x for x in load_feed_cache(cache_path)
-        if x.get('path') != item['path']
-    ]
-  )
-  return item
-
-
 def mark_seen(box: mailbox.Maildir, key: str) -> None:
   msg = box.get_message(key)
   msg.set_subdir('cur')
@@ -319,13 +181,8 @@ def mark_seen(box: mailbox.Maildir, key: str) -> None:
   box.flush()
 
 
-def main() -> int:
-
+def main():
   os.umask(0o022)  # Molly refuses to serve non-world-readable files
-
-  logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s %(levelname)s: %(message)s')
 
   feed_dir = publish_dir(FEED_PUBLISH_PATH)
   count = 0
