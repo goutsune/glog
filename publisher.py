@@ -1,24 +1,33 @@
-import dkim
+import re
+import json
 from types import SimpleNamespace
+from email import policy
 from email.parser import BytesParser
-from email.utils import parseaddr
+from email.utils import parseaddr, parsedate_to_datetime
+
+import dkim
 from slugify import slugify
+from feedgen.feed import FeedGenerator
+from pathvalidate import sanitize_filename
 
 from config import (
+  log,
+  ROOT,
+  BASE_URL,
+  SITE_TITLE,
   ALLOWED_SENDER,
   SUBJ_PREFIX,
-  FEED_PUBLISH_PATH,
-  FEED_CACHE_NAME,
   DEFAULT_PUBLISH_PATH,
+  FEED_MAX_ENTRIES,
 )
 
+# -- Mail-related
 
-def verify(mail):
+def verify(mail, mail_obj):
+
   if not dkim.verify(mail):
-    log.warning('invalid DKIM')
+    log.warning('Invalid DKIM for %s', mail_obj.get('Subject'))
     return False
-
-  mail_obj = BytesParser(policy=policy.default).parsebytes(mail)
 
   if parseaddr(mail_obj.get('From'))[1] != ALLOWED_SENDER:
     return False
@@ -33,6 +42,13 @@ def verify(mail):
     return False
 
   return True
+
+
+def msg_date(mail):
+  dt = parsedate_to_datetime(mail.get('Date')) if mail.get('Date') else None
+  if dt is None:
+    return datetime.now(timezone.utc)
+  return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 def text_part(mail):
@@ -64,52 +80,200 @@ def split_publish_path(text):
   return DEFAULT_PUBLISH_PATH, text
 
 
-def publish_dir(suffix):
+def get_abs_path(suffix=''):
   rel = suffix.strip().lstrip('/')
   path = ROOT / rel
   if not path.is_dir():
-    raise FileNotFoundError(f'publish directory does not exist: {path}')
+    raise FileNotFoundError(f'Publish directory does not exist: {path}')
   return path
+
+
+def extract_attachments(mail):
+  out = []
+  for part in mail.iter_attachments():
+    # Just in case we sent message containing html part
+    if part.get_content_type().lower() == 'text/html': continue
+    out.append((
+      sanitize_filename(part.get_filename()),
+      part.get_payload(decode=True)
+    ))
+
+  return out
+
+# -- Processing text
+
+def reflow(text):
+  # I need to unwrap email that usually gets wrapped at 72 charcters
+
+  verbatim = False
+  flush_buf = ''
+  # -- is used for email signatures, I need an explicit line break on it
+  tag_re = re.compile(r'^(#{1,3}|\*|>|=>|--)\s*')
+  result = list()
+
+  for line in text.splitlines():
+    line = line.rstrip()
+
+    # If the tag was ```, toggle verbatim output
+    if line.startswith('```'):
+      verbatim = not verbatim
+
+    if verbatim:
+      result.append(line)
+      continue
+
+    # Line is a tag, flush buffer if any and set line to buffer
+    if (groups := tag_re.match(line)):
+      if flush_buf:
+        result.append(flush_buf)
+        flush_buf = ''
+      flush_buf = line
+    # Line is normal and buffer non-empty, append to buffer
+    elif line and flush_buf:
+      flush_buf = flush_buf + ' ' + line
+    # Line is normal; buffer empty, set buffer
+    elif line:
+      flush_buf = line
+    # Line empty, and buffer set, flush buffer
+    elif flush_buf:
+      result.append(flush_buf)
+      result.append('')
+      flush_buf = ''
+    # Line empty and buffer empty, flush line
+    else:
+      result.append(line)
+
+  # Possible if there was last line in email with no signature and no empty lines after it
+  if flush_buf:
+    result.append(flush_buf)
+
+  output = '\n'.join(result)
+  return output
+
+
+def replace_placeholders(text, filenames):
+  fn_iter = iter(filenames)
+
+  def replace_cb(reg_obj):
+    try:
+      fname = next(fn_iter)
+      return f'=> {fname}'
+
+    except StopIteration:
+      log.warning(f'Unable to replace %s, no more attachments', reg_obj)
+      return reg_obj.group(0)
+
+  # Only touch '=> {}', leave the rest of line
+  return re.sub(r'=> {}', replace_cb, text)
+
+
+def save_article(article, title, article_path):
+  with open(article_path, 'w') as handle:
+    handle.write(f'# {title}\n\n')
+    handle.write(article)
+
+# -- Writing index and atom
+
+def insert_index_entry(index, article, title):
+  new_entry = f"=> {article} {title}\n"
+
+  with open(index, 'r+') as handle:
+    lines = handle.readlines()
+
+    # Look for first line starting with date link
+    insert_idx = len(lines)
+    for i, line in enumerate(lines):
+      if re.match(r'^=> \d{4}-\d{2}-\d{2}', line):
+        insert_idx = i
+        break
+
+    lines.insert(insert_idx, new_entry)
+
+    # Overwrite
+    handle.seek(0)
+    handle.writelines(lines)
+    handle.truncate()
+
+
+def update_atom(title, path, date):
+  # Prepare new article object
+  item = {'title': title, 'path': path, 'updated': date.isoformat()}
+
+  # Update cache
+  cache_path = get_abs_path() / '.atom-feed-cache.json'
+  with open(cache_path, 'r') as handle:
+    entries = json.load(handle)
+
+  entries.insert(0, item)
+  entries = entries[:FEED_MAX_ENTRIES]
+
+  # Make feed
+  fg = FeedGenerator()
+  fg.id(BASE_URL)
+  fg.title(SITE_TITLE)
+  fg.updated(date.isoformat())
+  fg.link(href=BASE_URL, rel='alternate')
+  fg.link(href=BASE_URL + 'atom.xml', rel='self')
+
+  for item in entries:
+    fe = fg.add_entry()
+    url = BASE_URL + item['path']
+    fe.id(url)
+    fe.title(item['title'])
+    fe.link(href=url)
+    fe.updated(date.isoformat())
+  fg.atom_file(str(ROOT / 'atom.xml'), pretty=True)
+
+  # Store cache if nothing blew up
+  with open(cache_path, 'w') as handle:
+    json.dump(entries, handle, indent=2)
 
 
 def publish(mail):
 
   mail_obj = BytesParser(policy=policy.default).parsebytes(mail)
-  if not verify(mail): return None
+  if not verify(mail, mail_obj):
+    log.info(f'Skipping {mail_obj["Subject"]}')
+    return True
 
-  body = text_part(mail_obj)
-  title = mail_obj.get('Subject').strip().replace(SUBJ_PREFIX, '')
-  date = msg_date(mail_obj)
+  # Prepare metadata and raw body
+  raw_body = text_part(mail_obj)
+  title = mail_obj['Subject'].strip().replace(SUBJ_PREFIX, '')
+  date = parsedate_to_datetime(mail_obj['Date'])  # Fails if there is no date
+  log.info(f'Publishing %s', title)
 
-  suffix, body = split_publish_path(body)
-  out_dir = publish_dir(suffix)
+  path_suffix, raw_body = split_publish_path(raw_body)
+  out_dir = get_abs_path(path_suffix)
 
-  article_fn = f'{date:%Y-%m-%d}-{slugify(title, 20)}'
-  article_path = out_dir / f'{article_fn}.gmi'
-  article_attach_dir = out_dir / article_fn
+  article_prefix = f'{date:%Y-%m-%d}-{slugify(title, max_length=20, word_boundary=True)}'
+  article_attach_dir = out_dir / article_prefix
+  article_file = out_dir / f'{article_prefix}.gmi'
 
-  # That's it for today, need to rewrite more of this sludge later
-  saved = []
-  for name, data in attachments(mail_obj):
-    article_attach_dir.mkdir(exist_ok=False) if not article_attach_dir.exists() else None
-    saved.append(save_unique(article_attach_dir / name, data))
+  # Store attachments first so we get a list of tokens for replacements
+  # FIXME: This'll leave dangling files if article processing fails
+  attachments = []
+  for name, data in extract_attachments(mail_obj):
+    if not article_attach_dir.exists(): article_attach_dir.mkdir()
+    with open(article_attach_dir / name, 'wb') as handle:
+      handle.write(data)
+    attachments.append(f'{article_prefix}/{name}')
 
-  body = replace_placeholders(reflow(body), saved, out_dir)
-  atomic_write(article, f'# {title}\n\n{body.strip()}\n'.encode())
+  # Process the article itself
+  article = reflow(raw_body)
+  article = replace_placeholders(article, attachments)
+  save_article(article, title, article_file)
+
+  # Add entry to the relevant index page
   title_date = f'{date:%Y-%m-%d} {title}'
-  insert_index_entry(out_dir / 'index.gmi', article_path, title_date)
+  insert_index_entry(
+    out_dir / 'index.gmi',
+    f'{article_prefix}.gmi',
+    title_date)
 
-  item = {
-    'title': title,
-    'path': f'{suffix}/{article_path}' if suffix else f'/{article_path}',
-    'updated': date.isoformat()
-  }
-  cache_path = publish_dir(FEED_PUBLISH_PATH) / FEED_CACHE_NAME
-  save_feed_cache(
-    cache_path,
-    [item] + [
-      x for x in load_feed_cache(cache_path)
-        if x.get('path') != item['path']
-    ]
-  )
-  return item
+  # Update feed
+  update_atom(
+    title,
+    f'{path_suffix}/{article_prefix}.gmi',
+    date)
+
+  return True

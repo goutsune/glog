@@ -1,0 +1,21 @@
+import logging
+from pathlib import Path
+
+MAILDIR = Path('/path-to-maildir-folder/')
+ROOT = Path('site-root-folder')
+ALLOWED_SENDER = 'me@domain.tld'
+BASE_URL = 'gemini://domain.tld/'
+SITE_TITLE = 'Coolsite'
+FEED_MAX_ENTRIES = 10
+SUBJ_PREFIX = 'gmi: '
+
+# Relative to ROOT
+DEFAULT_PUBLISH_PATH = '/glog'
+
+log = logging.getLogger('gemlog')
+log.propagate = False
+log.setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('%(levelname)s - %(module)s.%(funcName)s - %(message)s'))
+log.addHandler(handler)
