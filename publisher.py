@@ -271,7 +271,7 @@ def publish(mail):
 
   # Prepare metadata and raw body
   raw_body = text_part(mail_obj)
-  title = mail_obj['Subject'].strip().replace(SUBJ_PREFIX, '')
+  title = mail_obj['Subject'].strip().removeprefix(SUBJ_PREFIX)
   date = parsedate_to_datetime(mail_obj['Date'])  # Fails if there is no date
   log.info(f'Publishing %s', title)
 
