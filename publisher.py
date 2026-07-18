@@ -1,7 +1,5 @@
 import re
 import json
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from email import policy
 from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
@@ -61,13 +59,6 @@ def verify(mail, mail_obj):
     return False
 
   return True
-
-
-def msg_date(mail):
-  dt = parsedate_to_datetime(mail.get('Date')) if mail.get('Date') else None
-  if dt is None:
-    return datetime.now(timezone.utc)
-  return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 def text_part(mail):
