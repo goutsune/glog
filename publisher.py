@@ -118,13 +118,18 @@ def reflow(text):
   # I need to unwrap email that usually gets wrapped at 72 charcters
 
   verbatim = False
+  in_sig = False
   flush_buf = ''
-  # -- is used for email signatures, I need an explicit line break on it
-  tag_re = re.compile(r'^(#{1,3}|\*|>|=>|--)\s*')
+  tag_re = re.compile(r'^(#{1,3}|\*|>|=>)\s*')
   result = list()
 
   for line in text.splitlines():
     line = line.rstrip()
+
+    # -- starts the signature, keep the rest of the mail line-per-line
+    if in_sig:
+      result.append(line)
+      continue
 
     # ``` toggles verbatim output; the fence line itself always goes out as-is
     if line.startswith('```'):
@@ -137,6 +142,14 @@ def reflow(text):
 
     if verbatim:
       result.append(line)
+      continue
+
+    if line == '--':
+      if flush_buf:
+        result.append(flush_buf)
+        flush_buf = ''
+      result.append(line)
+      in_sig = True
       continue
 
     # Line is a tag, flush buffer if any and set line to buffer
