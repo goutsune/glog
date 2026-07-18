@@ -249,7 +249,8 @@ def update_atom(title, path, date):
 
   for item in entries[:FEED_MAX_ENTRIES]:
     fe = fg.add_entry()
-    url = BASE_URL + item['path']
+    # path starts with '/' and BASE_URL ends with one
+    url = BASE_URL + item['path'].lstrip('/')
     fe.id(url)
     fe.title(item['title'])
     fe.link(href=url)
@@ -266,7 +267,7 @@ def publish(mail):
   mail_obj = BytesParser(policy=policy.default).parsebytes(mail)
   if not verify(mail, mail_obj):
     log.info(f'Skipping {mail_obj["Subject"]}')
-    return True
+    return False
 
   # Prepare metadata and raw body
   raw_body = text_part(mail_obj)
