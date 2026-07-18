@@ -1,5 +1,6 @@
 import re
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from email import policy
 from email.parser import BytesParser
@@ -23,10 +24,28 @@ from config import (
 
 # -- Mail-related
 
+def check_dkim(mail, mail_obj):
+  # Require a valid signature whose signing domain is ALLOWED_SENDER's domain.
+  sender_domain = ALLOWED_SENDER.rpartition('@')[2].lower()
+  sig = dkim.DKIM(mail)
+
+  for idx in range(len(mail_obj.get_all('DKIM-Signature', []))):
+    try:
+      if not sig.verify(idx):
+        continue
+    except dkim.DKIMException:
+      # We'll eventually end loop and return False anyway
+      continue
+    if sig.domain.decode().lower().rstrip('.') == sender_domain:
+      return True
+
+  return False
+
+
 def verify(mail, mail_obj):
 
-  if not dkim.verify(mail):
-    log.warning('Invalid DKIM for %s', mail_obj.get('Subject'))
+  if not check_dkim(mail, mail_obj):
+    log.warning('No proper DKIM signature for %s', mail_obj.get('Subject'))
     return False
 
   if parseaddr(mail_obj.get('From'))[1] != ALLOWED_SENDER:
