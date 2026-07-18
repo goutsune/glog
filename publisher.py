@@ -1,5 +1,6 @@
 import re
 import json
+from datetime import datetime
 from email import policy
 from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
@@ -226,32 +227,33 @@ def insert_index_entry(index, article, title):
 
 
 def update_atom(title, path, date):
-  # Prepare new article object
-  item = {'title': title, 'path': path, 'updated': date.isoformat()}
-
-  # Update cache
+  # Cache holds every article ever published. The feed then slices newest few.
   cache_path = get_abs_path() / '.atom-feed-cache.json'
-  with open(cache_path, 'r') as handle:
-    entries = json.load(handle)
+  try:
+    with open(cache_path, 'r') as handle:
+      entries = json.load(handle)
+  except FileNotFoundError:
+    entries = []
 
-  entries.insert(0, item)
-  entries = entries[:FEED_MAX_ENTRIES]
+  # Upsert by path, so republishing an article refreshes its entry
+  entries = [e for e in entries if e['path'] != path]
+  entries.insert(0, {'title': title, 'path': path, 'updated': date.isoformat()})
 
   # Make feed
   fg = FeedGenerator()
   fg.id(BASE_URL)
   fg.title(SITE_TITLE)
-  fg.updated(date.isoformat())
+  fg.updated(max(datetime.fromisoformat(e['updated']) for e in entries))
   fg.link(href=BASE_URL, rel='alternate')
   fg.link(href=BASE_URL + 'atom.xml', rel='self')
 
-  for item in entries:
+  for item in entries[:FEED_MAX_ENTRIES]:
     fe = fg.add_entry()
     url = BASE_URL + item['path']
     fe.id(url)
     fe.title(item['title'])
     fe.link(href=url)
-    fe.updated(date.isoformat())
+    fe.updated(item['updated'])
   fg.atom_file(str(ROOT / 'atom.xml'), pretty=True)
 
   # Store cache if nothing blew up
