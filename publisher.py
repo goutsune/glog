@@ -48,7 +48,7 @@ def verify(mail, mail_obj):
     log.warning('No proper DKIM signature for %s', mail_obj.get('Subject'))
     return False
 
-  if parseaddr(mail_obj.get('From'))[1] != ALLOWED_SENDER:
+  if parseaddr(mail_obj.get('From') or '')[1] != ALLOWED_SENDER:
     return False
 
   if not mail_obj.get('Subject').startswith(SUBJ_PREFIX) :
@@ -81,10 +81,12 @@ def text_part(mail):
      and part.get_content_disposition() != 'attachment':
       body = part.get_content()
 
-  # Normalize line endings while at it
-  body = body.replace('\r\n', '\n').replace('\r', '\n')
+  # otherwise replace will blow up
+  if body is None:
+    return None
 
-  return body
+  # Normalize line endings while at it
+  return body.replace('\r\n', '\n').replace('\r', '\n')
 
 
 def split_publish_path(text):
