@@ -126,9 +126,14 @@ def reflow(text):
   for line in text.splitlines():
     line = line.rstrip()
 
-    # If the tag was ```, toggle verbatim output
+    # ``` toggles verbatim output; the fence line itself always goes out as-is
     if line.startswith('```'):
       verbatim = not verbatim
+      if flush_buf:
+        result.append(flush_buf)
+        flush_buf = ''
+      result.append(line)
+      continue
 
     if verbatim:
       result.append(line)
