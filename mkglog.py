@@ -24,9 +24,10 @@ def main():
       if box.get_message(key).get_subdir() != 'new':
         continue
 
+      # Skipped mail is marked seen too, just not counted
       if publish(box.get_bytes(key)):
-        mark_seen(box, key)
         count += 1
+      mark_seen(box, key)
   finally:
     box.close()
 
