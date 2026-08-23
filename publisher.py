@@ -1,6 +1,8 @@
 import re
 import json
 from datetime import datetime
+from hashlib import md5
+from mimetypes import guess_extension
 from email import policy
 from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
@@ -108,7 +110,8 @@ def extract_attachments(mail):
     if part.get_content_type().lower() == 'text/html': continue
     out.append((
       sanitize_filename(part.get_filename()),
-      part.get_payload(decode=True)
+      part.get_payload(decode=True),
+      part.get_content_type()
     ))
 
   return out
@@ -285,7 +288,8 @@ def publish(mail):
   # Store attachments first so we get a list of tokens for replacements
   # FIXME: This'll leave dangling files if article processing fails
   attachments = []
-  for name, data in extract_attachments(mail_obj):
+  for name, data, mime in extract_attachments(mail_obj):
+    if not name: name = md5(data).hexdigest() + guess_extension(mime)
     if not article_attach_dir.exists(): article_attach_dir.mkdir()
     with open(article_attach_dir / name, 'wb') as handle:
       handle.write(data)
